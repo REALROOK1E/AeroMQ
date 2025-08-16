@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AeroMQ · 高并发与内存优化设计说明</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-lang="zh">
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <div class="logo-dot"></div>
+        <h1 class="brand-title">AeroMQ</h1>
+        <span class="brand-subtitle lang-zh">高并发 · 低延迟 · 可观测</span>
+        <span class="brand-subtitle lang-en">High Concurrency · Low Latency · Observable</span>
+      </div>
+      <div class="header-actions">
+        <button id="langToggle" class="lang-toggle" aria-label="Language Switch">
+          <span class="lang-zh">中文</span>
+          <span class="divider">｜</span>
+          <span class="lang-en">EN</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="container hero-inner">
+      <div class="hero-text">
+        <h2 class="lang-zh">面向高并发的消息中间件内核优化</h2>
+        <h2 class="lang-en">Kernel Optimizations for High‑Concurrency Messaging</h2>
+        <p class="lead lang-zh">ThreadLocal → RequestId 映射 · SPSC Ring Buffer 无锁队列 · Off‑heap DirectBuffer</p>
+        <p class="lead lang-en">ThreadLocal → RequestId Mapping · SPSC Lock‑free Ring · Off‑heap DirectBuffer</p>
+        <div class="badges">
+          <span class="badge">Java 17+</span>
+          <span class="badge">Netty</span>
+          <span class="badge">Lock‑free</span>
+          <span class="badge">Pooled Direct Memory</span>
+        </div>
+        <div class="cta">
+          <a class="btn btn-primary" href="#quickstart"><span class="lang-zh">立即开始</span><span class="lang-en">Get Started</span></a>
+          <a class="btn btn-outline" href="#modules"><span class="lang-zh">查看模块</span><span class="lang-en">View Modules</span></a>
+        </div>
+      </div>
+      <div class="hero-card">
+        <ul class="tick-list">
+          <li class="lang-zh"><strong>并发请求</strong>：RequestId → CompletableFuture 映射，支持海量并发</li>
+          <li class="lang-en"><strong>Concurrent Requests</strong>: RequestId → CompletableFuture mapping for high parallelism</li>
+          <li class="lang-zh"><strong>极致吞吐</strong>：SPSC Ring Buffer 替代 CLQ，混合等待策略</li>
+          <li class="lang-en"><strong>Throughput</strong>: SPSC Ring Buffer replaces CLQ with hybrid wait strategy</li>
+          <li class="lang-zh"><strong>低 GC 压力</strong>：DirectByteBuffer 池化，零拷贝发送</li>
+          <li class="lang-en"><strong>Low GC</strong>: Pooled DirectByteBuffer with zero‑copy send</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <div class="container toc-inner">
+      <a href="#overview" class="toc-link">Overview</a>
+      <a href="#features" class="toc-link">Features</a>
+      <a href="#architecture" class="toc-link">Architecture</a>
+      <a href="#modules" class="toc-link">Modules</a>
+      <a href="#usecases" class="toc-link">Use Cases</a>
+      <a href="#protocol" class="toc-link">Protocol</a>
+      <a href="#quickstart" class="toc-link">Quick Start</a>
+      <a href="#module-req" class="toc-link">Request Mapping</a>
+      <a href="#module-spsc" class="toc-link">SPSC Ring</a>
+      <a href="#module-offheap" class="toc-link">Off‑heap</a>
+      <a href="#observability" class="toc-link">Observability</a>
+      <a href="#benchmarks" class="toc-link">Benchmarks</a>
+      <a href="#security" class="toc-link">Security</a>
+      <a href="#troubleshooting" class="toc-link">Troubleshooting</a>
+      <a href="#faq" class="toc-link">FAQ</a>
+      <a href="#roadmap" class="toc-link">Roadmap</a>
+    </div>
+  </nav>
+
+  <main class="container">
+    <section id="overview" class="card">
+      <h3 class="section-title"><span class="index">00</span>
+        <span class="lang-zh">产品概览</span>
+        <span class="lang-en">Product Overview</span>
+      </h3>
+      <p class="lang-zh">AeroMQ 是一个面向高并发、低延迟场景的高性能消息队列系统，采用 Netty 异步 I/O、无锁 SPSC 环形队列和 off‑heap 内存池化，提供稳定且可观测的消息通道。</p>
+      <p class="lang-en">AeroMQ is a high‑performance message queue built for high concurrency and low latency, leveraging Netty async I/O, lock‑free SPSC ring buffers, and off‑heap pooled memory for stable and observable messaging.</p>
+      <div class="kpi">
+        <div><div class="kpi-num">100k+</div><div class="kpi-label lang-zh">小消息吞吐 (msg/s)</div><div class="kpi-label lang-en">Small‑msg throughput</div></div>
+        <div><div class="kpi-num">P99 &lt; 10ms</div><div class="kpi-label lang-zh">端到端延迟</div><div class="kpi-label lang-en">End‑to‑end latency</div></div>
+        <div><div class="kpi-num">1000+</div><div class="kpi-label lang-zh">并发连接</div><div class="kpi-label lang-en">Concurrent connections</div></div>
+      </div>
+    </section>
+
+    <section id="features" class="card">
+      <h3 class="section-title"><span class="index">01</span>
+        <span class="lang-zh">核心特性</span>
+        <span class="lang-en">Key Features</span>
+      </h3>
+      <div class="feature-grid">
+        <div class="feature"><strong class="lang-zh">并发请求映射</strong><strong class="lang-en">Concurrent Request Mapping</strong><p>RequestId → CompletableFuture</p></div>
+        <div class="feature"><strong>SPSC Ring</strong><p>Lock‑free, hybrid wait</p></div>
+        <div class="feature"><strong>Off‑heap</strong><p>Pooled DirectBuffer</p></div>
+        <div class="feature"><strong>Netty</strong><p>Async I/O</p></div>
+        <div class="feature"><strong>Benchmark</strong><p>CSV + Charts</p></div>
+        <div class="feature"><strong>Observability</strong><p>Stats & Logs</p></div>
+      </div>
+    </section>
+
+    <section id="architecture" class="card">
+      <h3 class="section-title"><span class="index">02</span>
+        <span class="lang-zh">架构与目录</span>
+        <span class="lang-en">Architecture & Layout</span>
+      </h3>
+<pre><code>AeroMQ/
+├─ aeromq-protocol     # 协议与命令 / Protocol & Commands
+├─ aeromq-core         # Broker 核心 / Broker Core
+├─ aeromq-client       # 客户端 SDK / Client SDK
+├─ aeromq-benchmark    # 基准测试 / Benchmark Suite
+└─ docs                # 静态文档 / Static Docs
+</code></pre>
+      <div class="diagram">
+        <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture Diagram">
+          <defs>
+            <linearGradient id="g1" x1="0" x2="1">
+              <stop offset="0%" stop-color="#2563eb"/>
+              <stop offset="100%" stop-color="#14b8a6"/>
+            </linearGradient>
+          </defs>
+          <rect x="10" y="30" width="180" height="120" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+          <text x="100" y="58" text-anchor="middle" font-size="14">Clients</text>
+          <rect x="210" y="30" width="180" height="120" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+          <text x="300" y="58" text-anchor="middle" font-size="14">Protocol / Netty</text>
+          <rect x="410" y="30" width="160" height="120" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+          <text x="490" y="58" text-anchor="middle" font-size="14">SPSC Queues</text>
+          <rect x="590" y="30" width="160" height="120" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+          <text x="670" y="58" text-anchor="middle" font-size="14">Off‑heap Pool</text>
+          <path d="M190 90 L210 90" stroke="url(#g1)" stroke-width="4"/>
+          <path d="M390 90 L410 90" stroke="url(#g1)" stroke-width="4"/>
+          <path d="M570 90 L590 90" stroke="url(#g1)" stroke-width="4"/>
+        </svg>
+      </div>
+      <ul>
+        <li class="lang-zh">协议采用长度前缀帧；命令集中管理（Commands）</li>
+        <li class="lang-en">Length‑prefixed frames; centralized Commands</li>
+        <li class="lang-zh">核心引擎整合 SPSC 与 off‑heap，最小 GC 暴露</li>
+        <li class="lang-en">Core integrates SPSC and off‑heap for minimal GC</li>
+      </ul>
+    </section>
+
+    <section id="modules" class="card">
+      <h3 class="section-title"><span class="index">03</span>
+        <span class="lang-zh">模块总览</span>
+        <span class="lang-en">Modules Overview</span>
+      </h3>
+      <div class="module-grid">
+        <div class="module-card"><h4>aeromq-protocol</h4><p class="lang-zh">定义协议与命令集</p><p class="lang-en">Defines protocol & commands</p></div>
+        <div class="module-card"><h4>aeromq-core</h4><p class="lang-zh">Broker 核心，SPSC + Off‑heap</p><p class="lang-en">Broker core, SPSC + Off‑heap</p></div>
+        <div class="module-card"><h4>aeromq-client</h4><p class="lang-zh">客户端 SDK，请求映射</p><p class="lang-en">Client SDK, request mapping</p></div>
+        <div class="module-card"><h4>aeromq-benchmark</h4><p class="lang-zh">性能测试与可视化</p><p class="lang-en">Benchmarks & charts</p></div>
+        <div class="module-card"><h4>docs</h4><p class="lang-zh">静态文档与示例</p><p class="lang-en">Static docs & samples</p></div>
+      </div>
+    </section>
+
+    <section id="usecases" class="card">
+      <h3 class="section-title"><span class="index">03A</span>
+        <span class="lang-zh">典型应用场景</span>
+        <span class="lang-en">Typical Use Cases</span>
+      </h3>
+      <div class="module-grid">
+        <div class="module-card"><h4 class="lang-zh">实时监控/告警</h4><h4 class="lang-en">Real‑time Monitoring/Alerting</h4><p>Low latency, high fan‑out</p></div>
+        <div class="module-card"><h4 class="lang-zh">交易与结算事件</h4><h4 class="lang-en">Transactional Events</h4><p>At‑least‑once semantics</p></div>
+        <div class="module-card"><h4 class="lang-zh">IoT / 流数据</h4><h4 class="lang-en">IoT / Streaming</h4><p>Backpressure aware</p></div>
+        <div class="module-card"><h4 class="lang-zh">微服务解耦</h4><h4 class="lang-en">Microservice Decoupling</h4><p>Async pipelines</p></div>
+      </div>
+    </section>
+
+    <section id="protocol" class="card">
+      <h3 class="section-title"><span class="index">03B</span>
+        <span class="lang-zh">协议要点</span>
+        <span class="lang-en">Protocol Details</span>
+      </h3>
+      <ul>
+        <li class="lang-zh">长度前缀二进制帧；Header 携带 <code>requestId</code>、命令、长度</li>
+        <li class="lang-en">Length‑prefixed binary frames; Header carries <code>requestId</code>, command, length</li>
+      </ul>
+<pre><code>// Frame (pseudo)
+struct Header {
+  int32 length;
+  int16 command; // e.g. SEND
+  int64 requestId;
+}
+// Payload: message body
+</code></pre>
+    </section>
+
+    <section id="quickstart" class="card">
+      <h3 class="section-title"><span class="index">04</span>
+        <span class="lang-zh">快速开始</span>
+        <span class="lang-en">Quick Start</span>
+      </h3>
+      <div class="grid two">
+        <div>
+          <h4>Windows</h4>
+<pre><code>install-maven.bat   // 可选：自动安装 Maven
+quick-start-fixed.bat  // 修复中文编码，推荐
+</code></pre>
+        </div>
+        <div>
+          <h4>Linux / macOS</h4>
+<pre><code>chmod +x quick-start.sh
+./quick-start.sh
+</code></pre>
+        </div>
+      </div>
+      <p class="muted lang-zh">若出现中文乱码，先执行 <code>chcp 65001</code> 再运行脚本。</p>
+      <p class="muted lang-en">If mojibake appears, run <code>chcp 65001</code> before scripts.</p>
+    </section>
+
+    <!-- Module 1: RequestId Mapping -->
+    <section id="module-req" class="card">
+      <h3 class="section-title">
+        <span class="index">01</span>
+        <span class="lang-zh">ThreadLocal → RequestId → CompletableFuture（支持高并发多请求）</span>
+        <span class="lang-en">ThreadLocal → RequestId → CompletableFuture (High‑Concurrency)</span>
+      </h3>
+
+      <div class="grid two">
+        <div>
+          <h4 class="muted lang-zh">目标与动机</h4>
+          <h4 class="muted lang-en">Goals & Motivation</h4>
+          <p class="lang-zh">摆脱 ThreadLocal 单线程限制，使用连接级 <strong>requestId 映射</strong> 精确回送响应。</p>
+          <p class="lang-en">Remove ThreadLocal single‑thread limits by using per‑connection <strong>requestId mapping</strong> for precise response routing.</p>
+
+          <h4 class="muted lang-zh">关键部件与数据结构</h4>
+          <h4 class="muted lang-en">Key Components & Data Structures</h4>
+          <ul>
+            <li><code>AtomicLong requestIdGen</code></li>
+            <li><code>ConcurrentHashMap&lt;Long, CompletableFuture&lt;Response&gt;&gt; pendingRequests</code></li>
+            <li class="lang-zh">超时调度器：<code>ScheduledExecutor</code> 或 <code>DelayQueue</code></li>
+            <li class="lang-en">Timeout handling via <code>ScheduledExecutor</code> or <code>DelayQueue</code></li>
+            <li class="lang-zh">消息协议携带 <code>requestId</code>（帧 header / protobuf 字段）</li>
+            <li class="lang-en">Protocol carries <code>requestId</code> (frame header / protobuf field)</li>
+          </ul>
+        </div>
+        <div>
+          <div class="callout">
+            <h5 class="lang-zh">客户端发送流程</h5>
+            <h5 class="lang-en">Client Send Flow</h5>
+<pre><code>long reqId = requestIdGen.incrementAndGet();
+CompletableFuture&lt;Response&gt; f = new CompletableFuture<>();
+pendingRequests.put(reqId, f);
+// ... serialize (with requestId) & write to channel
+scheduler.schedule(() -&gt; {
+  var g = pendingRequests.remove(reqId);
+  if (g != null) g.completeExceptionally(new TimeoutException());
+}, timeout, MILLISECONDS);
+return f;
+</code></pre>
+          </div>
+          <div class="callout">
+            <h5 class="lang-zh">客户端接收响应</h5>
+            <h5 class="lang-en">Client Receive Flow</h5>
+<pre><code>// decode to requestId + payload
+var f = pendingRequests.remove(requestId);
+if (f != null) f.complete(response);
+else log.warn("late/unknown response");
+</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        <strong class="lang-zh">Broker：</strong><span class="lang-zh">回包沿用请求中的 requestId；无请求ID的推送消息走订阅流。</span>
+        <strong class="lang-en">Broker:</strong> <span class="lang-en">echoes requestId in responses; push/notify without requestId uses subscription stream.</span>
+      </div>
+
+      <div class="grid two">
+        <div>
+          <h4 class="muted lang-zh">边界条件与注意</h4>
+          <h4 class="muted lang-en">Edge Cases & Notes</h4>
+          <ul>
+            <li class="lang-zh">限制 pending 数量，超阈值拒绝或 429</li>
+            <li class="lang-en">Limit pending count; reject or return 429 on overflow</li>
+            <li class="lang-zh">64‑bit requestId 回绕一般可忽略；循环需确保旧请求已清理</li>
+            <li class="lang-en">64‑bit wrap‑around is negligible; ensure old entries are purged</li>
+            <li class="lang-zh">断连时遍历 pending 并完成异常，避免资源泄露</li>
+            <li class="lang-en">On disconnect, fail all pending to release resources</li>
+          </ul>
+        </div>
+        <div>
+          <div class="kpi">
+            <div>
+              <div class="kpi-num">10k+</div>
+              <div class="kpi-label lang-zh">单连接并发</div>
+              <div class="kpi-label lang-en">Concurrent per connection</div>
+            </div>
+            <div>
+              <div class="kpi-num">P99 &lt; 10ms</div>
+              <div class="kpi-label lang-zh">端到端延迟</div>
+              <div class="kpi-label lang-en">End‑to‑end latency</div>
+            </div>
+            <div>
+              <div class="kpi-num">50%+</div>
+              <div class="kpi-label lang-zh">GC 压力下降</div>
+              <div class="kpi-label lang-en">GC pressure reduced</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Module 2: SPSC Ring Buffer -->
+    <section id="module-spsc" class="card">
+      <h3 class="section-title">
+        <span class="index">02</span>
+        <span class="lang-zh">SPSC Ring Buffer（无锁）与条件变量唤醒</span>
+        <span class="lang-en">SPSC Ring Buffer (Lock‑free) with Condition‑based Wakeup</span>
+      </h3>
+
+      <div class="grid two">
+        <div>
+          <h4 class="muted lang-zh">选择 SPSC 的场景</h4>
+          <h4 class="muted lang-en">When to Choose SPSC</h4>
+          <p class="lang-zh">按 key → shard 路由；每 shard 单消费者；多生产者通过连接缓冲聚合到单 SPSC。</p>
+          <p class="lang-en">Key→shard routing; single consumer per shard; multi‑producer via per‑connection buffer aggregated to one SPSC.</p>
+
+          <h4 class="muted lang-zh">实现要点</h4>
+          <h4 class="muted lang-en">Implementation Notes</h4>
+          <ul>
+            <li>容量 2 的幂，<code>index = seq & mask</code></li>
+            <li>head/tail 分离更新，避免写竞争</li>
+            <li>false sharing 避免（padding / <code>@Contended</code>）</li>
+            <li>内存序：写发布（release），读获取（acquire）</li>
+          </ul>
+        </div>
+        <div>
+<pre><code>// 判满/判空
+available = tail - head
+if (available == capacity) full
+if (available == 0) empty
+
+// 生产后通知（从空→非空才通知）
+if (wasEmpty) condition.signal();
+
+// 消费者等待（混合策略）
+spin a few cycles → condition.await(timeout)
+</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Module 3: Off-heap -->
+    <section id="module-offheap" class="card">
+      <h3 class="section-title">
+        <span class="index">03</span>
+        <span class="lang-zh">Off‑heap DirectByteBuffer：池化减少 GC</span>
+        <span class="lang-en">Off‑heap DirectByteBuffer: Pooled for Lower GC</span>
+      </h3>
+
+      <div class="grid two">
+        <div>
+          <h4 class="muted lang-zh">设计思路（内存池 + slab）</h4>
+          <h4 class="muted lang-en">Design (Pool + Slab)</h4>
+          <ul>
+            <li>预分配 direct memory，按 256B/1KB/4KB/16KB 分级</li>
+            <li>返回 <code>BufferRef</code>（id/offset/len），ring 保存引用而非 payload</li>
+            <li>处理后归还池；异常路径务必释放</li>
+            <li>推荐 Netty <code>PooledByteBufAllocator</code></li>
+          </ul>
+        </div>
+        <div>
+<pre><code>// 零拷贝发送（示意）
+ByteBuf buf = pooledAllocator.directBuffer(len);
+buf.writeBytes(offHeapRef);
+channel.writeAndFlush(buf); // avoid heap copy
+</code></pre>
+        </div>
+      </div>
+
+      <div class="note">
+        <span class="lang-zh">监控 direct memory 使用，必要时启用 NativeMemoryTracking；注意碎片与泄漏。</span>
+        <span class="lang-en">Monitor direct memory (enable NMT if needed); watch for fragmentation and leaks.</span>
+      </div>
+
+      <div class="grid two">
+        <div>
+          <h4 class="muted lang-zh">统计信息</h4>
+          <h4 class="muted lang-en">Memory Stats</h4>
+          <pre><code>// Off-heap MemoryStats (example output)
+active=128, allocated=2048, released=1920,
+memory=64,000,000 bytes, pools=[small=240, medium=120, large=60]
+</code></pre>
+        </div>
+        <div>
+          <h4 class="muted lang-zh">边界条件与注意</h4>
+          <h4 class="muted lang-en">Edge Cases & Notes</h4>
+          <ul>
+            <li class="lang-zh">内存碎片监控，必要时调整 slab 配置</li>
+            <li class="lang-en">Monitor for fragmentation; adjust slab config if needed</li>
+            <li class="lang-zh">DirectByteBuffer 直接分配的内存不受管控</li>
+            <li class="lang-en">DirectByteBuffer allocated memory is unmanaged</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="observability" class="card">
+      <h3 class="section-title"><span class="index">05A</span>
+        <span class="lang-zh">可观测性与指标</span>
+        <span class="lang-en">Observability & Metrics</span>
+      </h3>
+      <div class="feature-grid">
+        <div class="feature"><strong>Request</strong><p>inflight.count, timeout.count</p></div>
+        <div class="feature"><strong>Queues</strong><p>ring.depth, drain.rate</p></div>
+        <div class="feature"><strong>Memory</strong><p>direct.used, pool.{small,medium,large}</p></div>
+        <div class="feature"><strong>Network</strong><p>bytes.in/out, conn.count</p></div>
+      </div>
+    </section>
+
+    <section id="benchmarks" class="card">
+      <h3 class="section-title"><span class="index">05</span>
+        <span class="lang-zh">基准测试与可视化</span>
+        <span class="lang-en">Benchmarks & Visualization</span>
+      </h3>
+      <p class="lang-zh">使用 <code>BenchmarkRunner</code> 产出 CSV，配合 <code>scripts/visualize_benchmark.py</code> 生成图表与 HTML 报告。</p>
+      <p class="lang-en">Run <code>BenchmarkRunner</code> to produce CSV; visualize with <code>scripts/visualize_benchmark.py</code>.</p>
+      <div class="kpi">
+        <div><div class="kpi-num">100k+</div><div class="kpi-label">msg/s (100B)</div></div>
+        <div><div class="kpi-num">50k+</div><div class="kpi-label">msg/s (1KB)</div></div>
+        <div><div class="kpi-num">10k+</div><div class="kpi-label">msg/s (10KB)</div></div>
+      </div>
+    </section>
+
+    <section id="security" class="card">
+      <h3 class="section-title"><span class="index">06A</span>
+        <span class="lang-zh">安全与可靠性</span>
+        <span class="lang-en">Security & Reliability</span>
+      </h3>
+      <ul>
+        <li class="lang-zh">连接鉴权、命令级授权（可选）</li>
+        <li class="lang-en">Connection auth, command‑level authorization (optional)</li>
+        <li class="lang-zh">超时与断连回收 pending，避免资源泄露</li>
+        <li class="lang-en">Timeout/disconnect cleanup of pending to prevent leaks</li>
+        <li class="lang-zh">背压与队列容量限制，防止内存爆炸</li>
+        <li class="lang-en">Backpressure and queue capacity limits to prevent overload</li>
+      </ul>
+    </section>
+
+    <section id="troubleshooting" class="card">
+      <h3 class="section-title"><span class="index">06</span>
+        <span class="lang-zh">故障排除</span>
+        <span class="lang-en">Troubleshooting</span>
+      </h3>
+      <ul>
+        <li><strong>mvn 未找到</strong>：运行 <code>install-maven.bat</code> 或手动配置 PATH</li>
+        <li><strong>中文乱码</strong>：使用 <code>quick-start-fixed.bat</code> 或先执行 <code>chcp 65001</code></li>
+        <li><strong>端口占用</strong>：检查/释放 8888 端口（Windows: taskkill /PID &lt;PID&gt; /F）</li>
+      </ul>
+    </section>
+
+    <section id="faq" class="card">
+      <h3 class="section-title"><span class="index">06B</span>
+        <span class="lang-zh">常见问题</span>
+        <span class="lang-en">FAQ</span>
+      </h3>
+      <details>
+        <summary class="lang-zh">为何不用 MPSC 替代 SPSC？</summary>
+        <summary class="lang-en">Why not MPSC instead of SPSC?</summary>
+        <div class="lang-zh">SPSC 更简单且性能更优；多生产者可经聚合线程汇入单 SPSC。</div>
+        <div class="lang-en">SPSC is simpler and faster; multi‑producers can be aggregated into one SPSC.</div>
+      </details>
+      <details>
+        <summary class="lang-zh">requestId 会不会溢出？</summary>
+        <summary class="lang-en">Will requestId overflow?</summary>
+        <div class="lang-zh">使用 64 位整型，实际应用中可视为不会溢出。</div>
+        <div class="lang-en">Using 64‑bit integers; practically non‑overflowing.</div>
+      </details>
+    </section>
+
+    <section id="roadmap" class="card">
+      <h3 class="section-title"><span class="index">07</span>
+        <span class="lang-zh">路线图</span>
+        <span class="lang-en">Roadmap</span>
+      </h3>
+      <ul>
+        <li class="lang-zh">持久化后端（RocksDB / PostgreSQL）</li>
+        <li class="lang-en">Persistent backends (RocksDB / PostgreSQL)</li>
+        <li class="lang-zh">多节点集群与管理控制台</li>
+        <li class="lang-en">Multi‑node clustering & admin console</li>
+        <li class="lang-zh">指标与监控集成</li>
+        <li class="lang-en">Metrics & monitoring integration</li>
+      </ul>
+    </section>
+
+    <!-- Deep Dive -->
+    <section id="module-deep" class="card">
+      <h3 class="section-title">
+        <span class="index">04</span>
+        <span class="lang-zh">参考代码片段（伪代码）</span>
+        <span class="lang-en">Reference Snippets (Pseudo‑code)</span>
+      </h3>
+<pre><code>// RequestId → CompletableFuture
+long reqId = requestIdGen.incrementAndGet();
+CompletableFuture&lt;Response&gt; f = new CompletableFuture<>();
+pendingRequests.put(reqId, f);
+// ... write to channel (with requestId)
+scheduler.schedule(() -&gt; {
+  var g = pendingRequests.remove(reqId);
+  if (g != null) g.completeExceptionally(new TimeoutException());
+}, timeout, MILLISECONDS);
+</code></pre>
+
+<pre><code>// SPSC Ring Buffer (核心思路)
+final int capacity = 1 &lt;&lt; 16; // power-of-two
+final int mask = capacity - 1;
+volatile long head = 0, tail = 0;
+Object[] slots = new Object[capacity];
+
+boolean offer(Object x) {
+  long t = tail; long h = head;
+  if (t - h == capacity) return false; // full
+  slots[(int)(t & mask)] = x; // release
+  tail = t + 1;               // ordered
+  return true;
+}
+
+Object poll() {
+  long h = head; long t = tail;
+  if (t - h == 0) return null; // empty
+  Object x = slots[(int)(h & mask)]; // acquire
+  slots[(int)(h & mask)] = null;
+  head = h + 1;
+  return x;
+}
+</code></pre>
+    </section>
+  </main>
+
+  <button id="toTop" class="to-top" aria-label="Back to top">↑</button>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="product">
+        <strong>AeroMQ</strong>
+        <span class="sep">•</span>
+        <span class="lang-zh">高性能消息队列</span>
+        <span class="lang-en">High‑performance Message Queue</span>
+      </div>
+      <nav class="links">
+        <a href="#overview">Overview</a>
+        <a href="#features">Features</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#modules">Modules</a>
+        <a href="#quickstart">Quick Start</a>
+        <a href="#benchmarks">Benchmarks</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
